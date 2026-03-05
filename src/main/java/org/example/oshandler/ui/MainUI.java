@@ -30,6 +30,7 @@ public class MainUI extends JFrame {
 
     private Timer timer;
     private boolean finishedNotified = false;
+    private boolean deadlockNotified = false;
 
     public MainUI(myEngine engine, List<PCB> processTemplates, int quantum, int decay) {
         this.engine = engine;
@@ -123,6 +124,10 @@ public class MainUI extends JFrame {
 
                 if(!engine.isAllFinished()){
                     updateUI(engine.step());
+                    if (engine.isDeadlocked()) {
+                        timer.stop();
+                        showDeadlockMessage();
+                    }
                 }else{
                     timer.stop();
                     showFinishedMessage();
@@ -164,8 +169,9 @@ public class MainUI extends JFrame {
         }
 
         finishedNotified = false;
+        deadlockNotified = false;
         logArea.setText("");
-        updateUI(engine.step());
+        updateUI(engine.currentSnapshot("系统初始化完成"));
     }
 
 
@@ -275,6 +281,9 @@ public class MainUI extends JFrame {
         if (engine.isAllFinished()) {
             showFinishedMessage();
         }
+        if (engine.isDeadlocked()) {
+            showDeadlockMessage();
+        }
     }
 
     private void showFinishedMessage() {
@@ -286,5 +295,15 @@ public class MainUI extends JFrame {
                 String.format("所有进程已完成！\n算法: %s\n平均周转时间: %.2f",
                         engine.getSchedulerName(),
                         engine.getAverageTurnaround()));
+    }
+
+    private void showDeadlockMessage() {
+        if (deadlockNotified) {
+            return;
+        }
+        deadlockNotified = true;
+        JOptionPane.showMessageDialog(this,
+                String.format("系统处于死锁状态，已停止运行。\n算法: %s",
+                        engine.getSchedulerName()));
     }
 }
