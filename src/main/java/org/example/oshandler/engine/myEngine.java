@@ -17,7 +17,7 @@ public class myEngine implements SimulationEngine{
     private int quantum = 1;     // 时间片长度
     private int decay = 2;       // 每个时间片后优先级下降 +2（你也可以改成 +3）
     private PCB running = null;
-
+    private boolean deadlocked = false;
     // 到达事件表：time -> PCBs
     private final Map<Integer, List<PCB>> arrivals = new HashMap<>();
 
@@ -29,7 +29,7 @@ public class myEngine implements SimulationEngine{
         this.now = 0;
         this.running = null;
         this.arrivals.clear();
-
+        this.deadlocked = false;
         // 初始化到达表：arrivalTime 相同的放一起
         for (PCB p : all) {
             arrivals.computeIfAbsent(p.getArrivalTime(), k -> new ArrayList<>()).add(p);
@@ -67,24 +67,11 @@ public class myEngine implements SimulationEngine{
         StringBuilder log = new StringBuilder();
 
         // 1) 处理到达
-        List<PCB> arrived = arrivals.getOrDefault(now, List.of());
-
-
-        for (PCB p : all) {
-
-            if (p.getArrivalTime() <= now &&
-                    p.getState() == PCB.State.READY &&
-                    !scheduler.readyQueuesView().stream()
-                            .flatMap(List::stream)
-                            .toList()
-                            .contains(p)) {
-
-                scheduler.onArrive(p);
-
-                log.append("到达 ").append(p.getName())
-                        .append("(pri=").append(p.getPriority()).append(")；");
-            }
+        if (deadlocked) {
+            return snapshot("系统已处于死锁状态；");
         }
+        // 1) 处理到达
+        List<PCB> arrived = processArrivals(log, false);
 
         // 2) 到达/唤醒 可能触发抢占（仅对 PriorityRR 演示）
         if (scheduler instanceof PriorityRR prr && running != null && running.getState() == PCB.State.EXCUTE) {
@@ -121,8 +108,13 @@ public class myEngine implements SimulationEngine{
         // 4) 运行一个时间片（或剩余不足一个片）
         if (running == null) {
             // CPU 空转：时间推进 1（也可以推进到下一个到达点，但先简单）
-            now += 1;
-            log.append("CPU空转；");
+            if (detectDeadlock()) {
+                deadlocked = true;
+                log.append("系统死锁，退出运行；");
+            } else {
+                now += 1;
+                log.append("CPU空转；");
+            }
             return snapshot(log.toString());
         }
 
@@ -132,15 +124,42 @@ public class myEngine implements SimulationEngine{
             q = mlfq.getQuantumFor(running);
         }
 
-        int runTime = Math.min(q, running.remainingTime());
+
 
         running.setState(PCB.State.EXCUTE);
-        running.setUsedTime(running.getUsedTime() + runTime);
+
+        int executed = 0;
+        boolean preemptedMidSlice = false;
+
+        for (int i = 0; i < q && !running.isFinished(); i++) {
+            running.setUsedTime(running.getUsedTime() + 1);
+            executed += 1;
+            now += 1;
+
+            List<PCB> tickArrived = processArrivals(log, true);
+
+            if (scheduler instanceof PriorityRR prr) {
+                for (PCB p : tickArrived) {
+                    if (prr.shouldPreempt(running, p)) {
+                        log.append("抢占：").append(p.getName()).append(" 优先级更高；");
+                        preemptedMidSlice = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!preemptedMidSlice && scheduler instanceof MLFQ3 mlfq && mlfq.shouldPreempt(running)) {
+                log.append("MLFQ抢占；");
+                preemptedMidSlice = true;
+            }
+
+            if (preemptedMidSlice) {
+                break;
+            }
+        }
 
         log.append("运行 ").append(running.getName())
-                .append(" ").append(runTime).append("；");
-
-        now += runTime;
+                .append(" ").append(executed).append("；");
 
         // 5) 时间片结束：优先级衰减（限制到 100）
         if (scheduler instanceof PriorityRR) {
@@ -153,8 +172,6 @@ public class myEngine implements SimulationEngine{
         }
 
 
-        log.append("时间片结束 pri+=").append(decay)
-                .append(" -> ").append(running.getPriority()).append("；");
 
         // 6) 完成判定
         if (running.isFinished()) {
@@ -206,6 +223,50 @@ public class myEngine implements SimulationEngine{
         return all.stream().allMatch(PCB::isFinished);
     }
 
+    public boolean isDeadlocked() {
+        return deadlocked;
+    }
+
+    private List<PCB> processArrivals(StringBuilder log, boolean onlyCurrentTime) {
+        List<PCB> arrived = new ArrayList<>();
+        List<PCB> readySnapshot = scheduler.readyQueuesView().stream()
+                .flatMap(List::stream)
+                .toList();
+
+        for (PCB p : all) {
+            boolean arrivalMatched = onlyCurrentTime
+                    ? p.getArrivalTime() == now
+                    : p.getArrivalTime() <= now;
+
+            if (arrivalMatched
+                    && p.getState() == PCB.State.READY
+                    && p != running
+                    && !readySnapshot.contains(p)) {
+
+                scheduler.onArrive(p);
+                arrived.add(p);
+
+                log.append("到达 ").append(p.getName())
+                        .append("(pri=").append(p.getPriority()).append(")；");
+            }
+        }
+        return arrived;
+    }
+
+    private boolean detectDeadlock() {
+        if (running != null) return false;
+
+        boolean hasReady = scheduler.readyQueuesView().stream().anyMatch(q -> !q.isEmpty());
+        if (hasReady) return false;
+
+        boolean hasFutureArrivals = all.stream().anyMatch(p -> !p.isFinished() && p.getArrivalTime() > now);
+        if (hasFutureArrivals) return false;
+
+        return all.stream()
+                .anyMatch(p -> !p.isFinished() && p.getArrivalTime() <= now && p.getState() == PCB.State.WAIT);
+    }
+
+
     private Snapshot snapshot(String log) {
         Snapshot s = new Snapshot();
         s.time = now;
@@ -237,7 +298,7 @@ public class myEngine implements SimulationEngine{
         if (scheduler instanceof MLFQ3) {
             return "三级反馈队列调度";
         }
-        return "时间片轮转(优先级)";
+        return "时间片轮转";
     }
     public Snapshot currentSnapshot(String log) {
         return snapshot(log);

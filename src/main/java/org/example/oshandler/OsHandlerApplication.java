@@ -18,7 +18,7 @@ public class OsHandlerApplication {
         SpringApplication.run(OsHandlerApplication.class, args);
 
         myEngine engine = new myEngine();
-        int quantum=1;
+        int quantum=2;
         int decay =2;
         List<PCB> processes = List.of(
                 new PCB("P1",10,0,6),
