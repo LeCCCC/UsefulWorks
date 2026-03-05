@@ -38,6 +38,30 @@ public class myEngine implements SimulationEngine{
         }
     }
 
+    public void addProcess(PCB process) {
+        if (process == null) {
+            throw new IllegalArgumentException("线程不能为空");
+        }
+
+        if (findByName(process.getName()) != null) {
+            throw new IllegalArgumentException("线程名已存在: " + process.getName());
+        }
+
+        process.setUsedTime(0);
+        process.setStartTime(null);
+        process.setFinishTime(null);
+        process.setState(PCB.State.READY);
+
+        all.add(process);
+
+        if (process.getArrivalTime() <= now) {
+            scheduler.onArrive(process);
+            return;
+        }
+
+        arrivals.computeIfAbsent(process.getArrivalTime(), k -> new ArrayList<>()).add(process);
+    }
+
 
     public Snapshot step() {
         StringBuilder log = new StringBuilder();
@@ -203,8 +227,19 @@ public class myEngine implements SimulationEngine{
 
     public double getAverageTurnaround() {
         return all.stream()
-                .mapToInt(PCB::turnaroundTime)
+                .map(PCB::turnaroundTime)
+                .filter(Objects::nonNull)
+                .mapToInt(Integer::intValue)
                 .average()
                 .orElse(0);
+    }
+    public String getSchedulerName() {
+        if (scheduler instanceof MLFQ3) {
+            return "三级反馈队列调度";
+        }
+        return "时间片轮转(优先级)";
+    }
+    public Snapshot currentSnapshot(String log) {
+        return snapshot(log);
     }
 }
