@@ -171,7 +171,7 @@ public class MainUI extends JFrame {
         finishedNotified = false;
         deadlockNotified = false;
         logArea.setText("");
-        updateUI(engine.step());
+        updateUI(engine.currentSnapshot("算法已切换，等待开始运行"));
     }
 
 
