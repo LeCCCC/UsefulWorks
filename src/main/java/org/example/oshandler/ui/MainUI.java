@@ -6,10 +6,14 @@ import org.example.oshandler.engine.myEngine;
 import org.example.oshandler.scheduler.MLFQ3;
 import org.example.oshandler.scheduler.PriorityRR;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class MainUI extends JFrame {
 
@@ -31,6 +35,8 @@ public class MainUI extends JFrame {
     private Timer timer;
     private boolean finishedNotified = false;
     private boolean deadlockNotified = false;
+    private final Map<String, String> waitDependencies = new HashMap<>();
+    private final Set<String> finishedProcesses = new HashSet<>();
 
     public MainUI(myEngine engine, List<PCB> processTemplates, int quantum, int decay) {
         this.engine = engine;
@@ -95,12 +101,17 @@ public class MainUI extends JFrame {
         JButton autoBtn = new JButton("自动运行");
         JButton stopBtn = new JButton("停止");
         JButton switchBtn = new JButton("切换算法");
+        JButton blockBtn = new JButton("阻塞线程");
+        JButton wakeBtn = new JButton("唤醒线程");
 
         bottomPanel.add(addBtn);
         bottomPanel.add(stepBtn);
         bottomPanel.add(autoBtn);
         bottomPanel.add(stopBtn);
         bottomPanel.add(switchBtn);
+        bottomPanel.add(blockBtn);
+        bottomPanel.add(wakeBtn);
+
 
         add(bottomPanel,BorderLayout.SOUTH);
         addBtn.addActionListener(e -> openAddProcessDialog());
@@ -145,6 +156,9 @@ public class MainUI extends JFrame {
             }
         });
 
+        blockBtn.addActionListener(e -> openBlockProcessDialog());
+        wakeBtn.addActionListener(e -> openWakeProcessDialog());
+
         switchBtn.addActionListener(e -> {
             if (timer != null && timer.isRunning()) {
                 timer.stop();
@@ -170,11 +184,111 @@ public class MainUI extends JFrame {
 
         finishedNotified = false;
         deadlockNotified = false;
+        finishedProcesses.clear();
+        waitDependencies.clear();
+
         logArea.setText("");
         updateUI(engine.currentSnapshot("算法已切换，等待开始运行"));
     }
+    private void openBlockProcessDialog() {
+        Snapshot snapshot = engine.currentSnapshot("");
+        List<String> candidates = snapshot.all.stream()
+                .filter(p -> p.getState() != PCB.State.FINISH)
+                .map(PCB::getName)
+                .toList();
 
+        if (candidates.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "没有可阻塞的线程");
+            return;
+        }
 
+        JComboBox<String> waitingBox = new JComboBox<>(candidates.toArray(new String[0]));
+        JComboBox<String> wakerBox = new JComboBox<>(candidates.toArray(new String[0]));
+
+        JPanel panel = new JPanel(new GridLayout(0, 2, 8, 8));
+        panel.add(new JLabel("要阻塞的线程:"));
+        panel.add(waitingBox);
+        panel.add(new JLabel("由哪个线程结束后唤醒:"));
+        panel.add(wakerBox);
+
+        int result = JOptionPane.showConfirmDialog(this, panel, "阻塞线程", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result != JOptionPane.OK_OPTION) {
+            return;
+        }
+
+        String waitingName = (String) waitingBox.getSelectedItem();
+        String wakerName = (String) wakerBox.getSelectedItem();
+
+        if (waitingName == null || wakerName == null) {
+            return;
+        }
+
+        if (waitingName.equals(wakerName)) {
+            JOptionPane.showMessageDialog(this, "阻塞线程和唤醒线程不能相同", "输入错误", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        engine.block(waitingName);
+        waitDependencies.put(waitingName, wakerName);
+        updateUI(engine.currentSnapshot("线程 " + waitingName + " 进入等待，等待 " + wakerName + " 完成后唤醒"));
+    }
+
+    private void openWakeProcessDialog() {
+        Snapshot snapshot = engine.currentSnapshot("");
+        List<String> waitingCandidates = snapshot.all.stream()
+                .filter(p -> p.getState() == PCB.State.WAIT)
+                .map(PCB::getName)
+                .toList();
+
+        if (waitingCandidates.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "当前没有处于等待状态的线程");
+            return;
+        }
+
+        JComboBox<String> waitingBox = new JComboBox<>(waitingCandidates.toArray(new String[0]));
+        int result = JOptionPane.showConfirmDialog(this, waitingBox, "选择要唤醒的线程", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+
+        if (result != JOptionPane.OK_OPTION) {
+            return;
+        }
+
+        String waitingName = (String) waitingBox.getSelectedItem();
+        if (waitingName == null) {
+            return;
+        }
+
+        engine.wake(waitingName);
+        waitDependencies.remove(waitingName);
+        updateUI(engine.currentSnapshot("手动唤醒线程 " + waitingName));
+    }
+
+    private Snapshot applyAutoWakeByFinish(Snapshot snapshot) {
+        List<String> wakeLogs = new ArrayList<>();
+
+        List<PCB> newlyFinished = snapshot.all.stream()
+                .filter(p -> p.getState() == PCB.State.FINISH)
+                .filter(p -> finishedProcesses.add(p.getName()))
+                .toList();
+
+        for (PCB finished : newlyFinished) {
+            List<String> waitingNames = waitDependencies.entrySet().stream()
+                    .filter(entry -> finished.getName().equals(entry.getValue()))
+                    .map(Map.Entry::getKey)
+                    .toList();
+
+            for (String waitingName : waitingNames) {
+                engine.wake(waitingName);
+                waitDependencies.remove(waitingName);
+                wakeLogs.add("线程 " + finished.getName() + " 完成，自动唤醒 " + waitingName);
+            }
+        }
+
+        if (wakeLogs.isEmpty()) {
+            return snapshot;
+        }
+
+        return engine.currentSnapshot(String.join("；", wakeLogs));
+    }
     private void openAddProcessDialog() {
 
         JTextField nameField = new JTextField();
@@ -229,7 +343,7 @@ public class MainUI extends JFrame {
         }
     }
     private void updateUI(Snapshot s){
-
+        s = applyAutoWakeByFinish(s);
         timeLabel.setText("时间: " + s.time);
         runningLabel.setText("运行进程: " + s.running);
         schedulerLabel.setText("当前算法: " + engine.getSchedulerName());
